@@ -12,7 +12,7 @@ def urdu_to_roman_indic(text):
     # Transliterate
     roman = transliterate(
         text, 
-        sanscript.,  # Source script
+        sanscript.URDU,  # Source script
         sanscript.ITRANS  # Target roman scheme
         # Other schemes: HK, IAST, DEVANAGARI
     )

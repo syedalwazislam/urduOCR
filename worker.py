@@ -4,7 +4,8 @@ import torch
 import numpy as np
 from PIL import Image, ImageDraw
 import redis
-from rq import Worker, Queue, Connection
+from rq import Worker, Queue
+from rq import Connection
 
 from ultralytics import YOLO
 from model import Model

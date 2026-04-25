@@ -15,4 +15,4 @@ services:
       - redis
 
   redis:
-    image: redis:7-slim
+    image: redis:7

@@ -13,7 +13,6 @@ from ultralytics import YOLO
 from PIL import Image, ImageDraw
 import numpy as np
 import arabic_reshaper
-from bidi.algorithm import get_display
 import cv2
 import re
 
@@ -82,37 +81,47 @@ app.add_middleware(
 
 def fix_urdu_text(extracted_text):
     """
-    Fix Urdu text rendering by reshaping Arabic/Urdu characters and applying RTL direction.
+    Fix Urdu text rendering by reshaping Arabic/Urdu characters.
+
+    UTRNet processes images with a horizontal flip (FLIP_LEFT_RIGHT in read.py),
+    which means the model was trained on mirrored text. As a result, its raw
+    output is already in correct logical (Unicode) order — it does NOT need
+    get_display() / bidi reversal. Calling get_display() here would reverse
+    the text a second time, producing garbage output.
+
+    We only call arabic_reshaper.reshape() to connect individual glyphs so
+    they render correctly in any display context.
+
+    Mixed-script lines (e.g. "R-214، محلّہ عبداللہ") are handled safely
+    because arabic_reshaper only transforms Arabic/Urdu codepoints and leaves
+    Latin characters and digits untouched. The previous guard that skipped
+    reshaping for any line containing [A-Za-z0-9] was therefore wrong — it
+    caused Urdu glyphs on those lines to remain disconnected.
 
     Args:
-        extracted_text: Raw text extracted from OCR (may have disconnected letters)
+        extracted_text: Raw text returned by the UTRNet recognition model.
 
     Returns:
-        Properly formatted Urdu text with correct RTL rendering
+        Text with properly connected Urdu/Arabic glyphs, ready for display.
     """
     if not extracted_text or not extracted_text.strip():
         return extracted_text
-    
-    if re.search(r'[A-Za-z0-9]', extracted_text):
-        return extracted_text
 
     try:
-        # Step 1: Reshape Arabic/Urdu characters (connect them properly)
+        # Reshape only — do NOT call get_display() / bidi algorithm here.
+        # The model output is already in logical order due to the image flip
+        # applied during preprocessing (read.py line 14).
         reshaped_text = arabic_reshaper.reshape(extracted_text)
-
-        # Step 2: Apply right-to-left direction
-        bidi_text = get_display(reshaped_text)
-
-        return bidi_text
+        return reshaped_text
     except Exception as e:
-        # If reshaping fails, return original text
+        # If reshaping fails for any reason, return the raw text unchanged.
         print(f"Warning: Failed to reshape Urdu text: {e}")
         return extracted_text
 
 
 # ---------------------------------------------------------------------------
 # Phrases that should never appear in the OCR output (e.g. printed footers).
-# Matching is done on the raw (pre-bidi) text so it is encoding-independent.
+# Matching is done on the raw (pre-reshape) text so it is encoding-independent.
 # Add any additional unwanted phrases to this list as needed.
 # ---------------------------------------------------------------------------
 BLOCKED_PHRASES = [
@@ -120,13 +129,20 @@ BLOCKED_PHRASES = [
     "کارڈ ملنے پر",
     "لیٹر بکس میں ڈال دیں",
     "ڈال دیں",
+    "Issued Vide Section",
+    "NADRA Ordinance",
 ]
 
+# ---------------------------------------------------------------------------
 # Fraction of image height from the bottom that is treated as the footer zone.
 # Any bounding-box whose TOP edge falls below this threshold is discarded
 # before phrase matching, giving a second independent layer of protection.
-# Adjust this value if the footer sits higher up on the page (e.g. 0.85).
-FOOTER_ZONE_FRACTION = 0.90  # bottom 10% of the image
+#
+# CNIC cards have a large printed footer that typically starts around 75–80%
+# of the card height, so 0.78 reliably blocks it while keeping all address
+# lines (which end around 65–70%) intact.
+# ---------------------------------------------------------------------------
+FOOTER_ZONE_FRACTION = 0.78  # block bottom ~22% of the image
 
 
 def _is_footer_box(box, image_height: int) -> bool:
@@ -154,7 +170,7 @@ def predict(input_image: Image.Image, return_annotated_image: bool = False):
     # ------------------------------------------------------------------
     # Robust footer removal — Layer 1: spatial filter
     # Drop any box whose top edge is in the bottom FOOTER_ZONE_FRACTION
-    # of the image (e.g. the last 10% of image height).
+    # of the image (bottom ~22%).
     # ------------------------------------------------------------------
     image_height = input_image.size[1]
     bounding_boxes = [
@@ -166,7 +182,6 @@ def predict(input_image: Image.Image, return_annotated_image: bool = False):
     annotated_image = input_image.copy()
     draw = ImageDraw.Draw(annotated_image)
     for box in bounding_boxes:
-        # draw rectangle outline with random color and width=5
         draw.rectangle(box, fill=None, outline=tuple(np.random.randint(0, 255, 3)), width=5)
 
     """Crop the detected lines"""
@@ -187,7 +202,7 @@ def predict(input_image: Image.Image, return_annotated_image: bool = False):
             print(f"[filter] Blocked line: {raw_text!r}")
             continue
 
-        # Fix Urdu text rendering (reshape and apply RTL)
+        # Reshape Urdu glyphs for correct rendering (no bidi flip — see docstring)
         fixed_text = fix_urdu_text(raw_text)
         texts.append(fixed_text)
 

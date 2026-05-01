@@ -258,47 +258,77 @@ def text_recognizer_smart(img_cropped: Image.Image,
 # ──────────────────────────────────────────────────────────────────────────────
 # FIX 5 — Urdu text fixer that PRESERVES embedded ASCII tokens
 #
-# Problem: get_display() reorders digits / Latin tokens when they sit inside
-#          an RTL paragraph, making "R-214" appear as "412-R" or similar.
-# Solution: extract all ASCII tokens first, run bidi on the Urdu-only parts,
-#           then re-inject the ASCII tokens at the correct positions.
+# Root cause of 0000/0001 bug:
+#   The previous version used \u200C (zero-width non-joiner) as placeholder
+#   fences.  get_display() from python-bidi STRIPS these invisible chars,
+#   so "\u200C0003\u200C" became just "0003" in the output — every real
+#   token was replaced by its sequential index number.
+#
+# Fix: use a placeholder that is (a) pure ASCII so bidi won't reorder it,
+#      (b) contains characters that cannot appear in real OCR output, and
+#      (c) is unique per token.  We use the form  §§NNN§§  where NNN is a
+#      zero-padded counter.  The § signs are outside the Urdu/Arabic Unicode
+#      blocks so arabic_reshaper ignores them, and python-bidi treats the
+#      whole token as a neutral LTR run and leaves it in place.
 # ──────────────────────────────────────────────────────────────────────────────
 
+# Matches any contiguous run of ASCII letters, digits, hyphen, slash, backslash
 _ASCII_TOKEN_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9\-/\\]*')
+
+# Matches the placeholder we inject:  §§NNN§§
+_PLACEHOLDER_RE = re.compile(r'§§(\d+)§§')
 
 
 def fix_urdu_text(extracted_text: str) -> str:
     """
     Reshape Urdu characters and apply RTL direction while keeping
-    Latin / numeric tokens (house numbers, IDs) in their correct order.
+    Latin / numeric tokens (house numbers, CNIC digits, IDs) intact.
+
+    Strategy
+    --------
+    1. Normalise Eastern-Arabic digits → ASCII digits.
+    2. Replace every ASCII token with a safe placeholder  §§NNN§§
+       BEFORE passing the string to arabic_reshaper / get_display.
+    3. Run reshape + get_display on the placeholder-protected string.
+    4. Re-inject the original tokens by scanning for §§NNN§§ patterns.
+
+    Why §§NNN§§ works where \u200CNNN\u200C failed
+    -----------------------------------------------
+    python-bidi strips or repositions zero-width Unicode chars (\u200C etc.)
+    because they are "weak" bidi characters.  Plain ASCII §§NNN§§ tokens are
+    treated as a neutral LTR island and are left untouched.
+    arabic_reshaper only reshapes Arabic/Urdu codepoints, so § passes through.
     """
     if not extracted_text or not extracted_text.strip():
         return extracted_text
 
     try:
-        # Step 1: Normalise Eastern-Arabic digits → ASCII digits
+        # Step 1: Normalise Eastern-Arabic/Urdu digits → ASCII digits
         text = _normalise_digits(extracted_text)
 
-        # Step 2: Placeholder substitution — replace each ASCII token with a
-        #         unique placeholder so bidi/reshaper doesn't touch them.
-        placeholders = {}
-        def _replace(m):
-            key = f"\u200C{len(placeholders):04d}\u200C"   # zero-width non-joiner fence
-            placeholders[key] = m.group(0)
-            return key
-        protected = _ASCII_TOKEN_RE.sub(_replace, text)
+        # Step 2: Collect tokens and substitute with §§NNN§§ placeholders
+        token_store: list[str] = []   # index → original token
 
-        # Step 3: Reshape Arabic/Urdu characters
+        def _stash(m: re.Match) -> str:
+            idx = len(token_store)
+            token_store.append(m.group(0))
+            return f"§§{idx:03d}§§"
+
+        protected = _ASCII_TOKEN_RE.sub(_stash, text)
+
+        # Step 3: Reshape Arabic/Urdu ligatures
         reshaped = arabic_reshaper.reshape(protected)
 
-        # Step 4: Apply bidi
+        # Step 4: Apply BiDi (RTL reordering)
         bidi_text = get_display(reshaped)
 
-        # Step 5: Re-inject original ASCII tokens
-        for key, original in placeholders.items():
-            bidi_text = bidi_text.replace(key, original)
+        # Step 5: Re-inject original tokens
+        def _restore(m: re.Match) -> str:
+            idx = int(m.group(1))
+            return token_store[idx] if idx < len(token_store) else m.group(0)
 
-        return bidi_text
+        restored = _PLACEHOLDER_RE.sub(_restore, bidi_text)
+        return restored
 
     except Exception as e:
         print(f"Warning: Failed to reshape Urdu text: {e}")

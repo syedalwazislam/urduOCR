@@ -16,3 +16,9 @@ python-multipart==0.0.6
 requests==2.31.0
 redis
 rq==1.15.1
+
+# CNIC extraction via Gemini Vision (free)
+google-generativeai>=0.7.0
+
+# .env file support
+python-dotenv>=1.0.0

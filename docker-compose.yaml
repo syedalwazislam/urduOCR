@@ -4,15 +4,29 @@ services:
   api:
     build: .
     ports:
-      - "8000:8000"
+      - "${API_PORT:-8000}:8000"
+    env_file:
+      - .env                  # loads your .env automatically
+    environment:
+      - REDIS_HOST=redis      # override so api always finds the redis container
     depends_on:
       - redis
+    restart: unless-stopped
+    volumes:
+      - ./best_norm_ED.pth:/app/best_norm_ED.pth      # mount model files
+      - ./yolov8m_UrduDoc.pt:/app/yolov8m_UrduDoc.pt  # so they aren't baked into image
 
   worker:
     build: .
     command: python worker.py
+    env_file:
+      - .env
+    environment:
+      - REDIS_HOST=redis
     depends_on:
       - redis
+    restart: unless-stopped
 
   redis:
     image: redis:7
+    restart: unless-stopped
